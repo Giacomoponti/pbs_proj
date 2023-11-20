@@ -27,3 +27,10 @@ class FluidSimulator:
             )
     
         return FluidSimulator(solver)  
+    
+    def render(self):
+        self._render_background()
+        self._render_ball()
+        self._render_pipe()
+        self._render_water()
+        return self.rbg_buffer.to_numpy()

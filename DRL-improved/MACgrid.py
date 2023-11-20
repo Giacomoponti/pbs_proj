@@ -1,7 +1,8 @@
+import taichi as ti
 
 class MACgrid:
 
-    def __init__(self, width, length):
+    def __init__(self, width, length, h):
         self.width = width
         self.length = length 
         self.h = h 
@@ -14,20 +15,22 @@ class MACgrid:
         #pressuere grid
         self.pressure = ti.field(dtype=ti.f32, shape=(width, length))
 
-    def U(pos): 
-        interpolate(pos / h - ti.Vector(0, 0.5), self.vel_u)
+    def interpolate(self, pos, grid):
+        i, f = self.get_barycentric(pos)
+        return grid[i] * (1 - f) + grid[i + 1] * f
+    
+    def U(self, pos): 
+        self.interpolate(pos / self.h - ti.Vector(0, 0.5), self.vel_u)
 
-    def V(pos):
-        interpolate(pos / h - ti.Vector(0.5, 0), self.vel_v)
+    def V(self, pos):
+        self.interpolate(pos / self.h - ti.Vector(0.5, 0), self.vel_v)
 
-    def velocity(pos):
-        return ti.Vector([U(pos), V(pos)])    
+    def velocity(self, pos):
+        return ti.Vector([self.U(pos), self.V(pos)])    
 
     def get_barycentric(p):
         i = int(p)
         f = p - i
         return i, f
 
-    def interpolate(pos, grid):
-        i, f = get_barycentric(pos)
-        return grid[i] * (1 - f) + grid[i + 1] * f    
+        
