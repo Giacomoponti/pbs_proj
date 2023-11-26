@@ -31,6 +31,9 @@ display_inverted_color_field = ti.Vector.field(n=3, dtype=float, shape=shape)
 divergence_field = ti.field(dtype=float, shape=shape)
 pressure_field_p = ti.field(dtype=float, shape=shape)
 
+#field for boundary conditions
+bc_mask = ti.field(dtype=float, shape=shape)
+
 # pressure solver
 # from: https://github.com/taichi-dev/taichi/blob/master/python/taichi/examples/simulation/stable_fluid.py
 @ti.kernel
@@ -100,8 +103,21 @@ def bilerp(vf, coord):
 
 @ti.kernel
 def update_advection_step():
+
+    #temporarily set color to 0 for boundary conditions, to prevent color from leaking out
+    for i, j in color_field_q:
+        if bc_mask[i, j] == 1:
+            color_field_q[i, j] = 0
+
+
     # according to ETH lecture 4 slide 36
     for i, j in velocity_field_u:
+    
+        #ADDED: set velocity at boundary condition
+        if bc_mask[i, j] == 1:
+            velocity_field_u[i, j] = ti.Vector([0, 0])
+            continue
+                
         # 1. Dertime velocity u_ij at grid point
         velocity_u_ij = velocity_field_u[i, j]
         # 2. Integrate position for a timestep of - delta_t
@@ -112,10 +128,9 @@ def update_advection_step():
         position_source = position_now - velocity_u_ij * stepsize_delta_t
         # 3. Interpolate q at x_source to obtain q_source
         # q seems to be the color value
-        color_q_source = bilerp(color_field_q, position_source)
+        color_q_source = bilerp(color_field_q, position_source) #this interpolation creates problem in aroiund the ball as the color is interpolated from the sphere too
         # 4. Assign q_ij = q_source for next time step
         new_color_field_q[i, j] = color_q_source * color_multiplier
-
         # redo step 3 for velocity as well. Actually q is the color as well as the velocity
         # 3. Interpolate q at x_source to obtain q_source
         # q seems to be the color value
@@ -123,12 +138,20 @@ def update_advection_step():
         # 4. Assign q_ij = q_source for next time step
         new_velocity_field_u[i, j] = velocity_u_source * color_multiplier
 
+    #reset color to red for boundary conditions
+    for i, j in color_field_q:
+        if bc_mask[i, j] == 1:
+            new_color_field_q[i, j] = ti.Vector([0, 255, 255])
+
+        
     # set the new fields to the old pointers.
     field_copy(new_color_field_q, color_field_q)
     field_copy(new_velocity_field_u, velocity_field_u)
 
     # apply boundary conditions
     # TODO: apply boundary conditions
+
+
 
 @ti.kernel
 def update_externalforces_step():
@@ -187,10 +210,11 @@ def update_velocities_from_pressure():
         pt = sample(pressure_field_p, i, j + 1)
         velocity_field_u[i, j] -= 0.5 * ti.Vector([pr - pl, pt - pb])
 
+
 def update_pressure_step():
     # solve linear system on sparse matrix to solve for pressure,
     # then use explicit Euler to update next step
-
+    update_pressure_bc(pressure_field_p, bc_mask)
     # see: https://github.com/taichi-dev/taichi/blob/master/python/taichi/examples/simulation/stable_fluid.py
     # first compute the divergence.
     # This is the right hand side of the 2D MAC grid equation on ETH lecture 4 slide 39
@@ -199,10 +223,32 @@ def update_pressure_step():
     fill_fb_array(F_b)
     x = solver.solve(F_b)
     fill_pressure_field_back_in(x)
-    
+    # update pressure 
     update_velocities_from_pressure()
     # swap_velocity_fields() the above for loop does not depend on the velocity field,
     # so we can update the old field directly without needing to swap
+
+@ti.kernel
+def update_pressure_bc(pressure_field_p: ti.template(), bc_mask: ti.template()):
+    # update the pressure at boundary conditions
+    for i, j in pressure_field_p:
+        if bc_mask[i, j] == 1:
+            if bc_mask[i - 1, j] == 0 and bc_mask[i, j - 1] == 1 and bc_mask[i, j + 1] == 1:
+                pressure_field_p[i, j] = pressure_field_p[i - 1, j]
+            elif bc_mask[i + 1, j] == 0 and bc_mask[i, j - 1] == 1 and bc_mask[i, j + 1] == 1:
+                pressure_field_p[i, j] = pressure_field_p[i + 1, j]
+            elif bc_mask[i, j - 1] == 0 and bc_mask[i - 1, j] == 1 and bc_mask[i + 1, j] == 1:
+                pressure_field_p[i, j] = pressure_field_p[i, j - 1]
+            elif bc_mask[i, j + 1] == 0 and bc_mask[i - 1, j] == 1 and bc_mask[i + 1, j] == 1:
+                pressure_field_p[i, j] = pressure_field_p[i, j + 1]
+            elif bc_mask[i - 1, j] == 0 and bc_mask[i, j + 1] == 0:
+                pressure_field_p[i, j] = (pressure_field_p[i - 1, j] + pressure_field_p[i, j + 1]) / 2.0
+            elif bc_mask[i + 1, j] == 0 and bc_mask[i, j + 1] == 0:
+                pressure_field_p[i, j] = (pressure_field_p[i + 1, j] + pressure_field_p[i, j + 1]) / 2.0
+            elif bc_mask[i - 1, j] == 0 and bc_mask[i, j - 1] == 0:
+                pressure_field_p[i, j] = (pressure_field_p[i - 1, j] + pressure_field_p[i, j - 1]) / 2.0
+            elif bc_mask[i + 1, j] == 0 and bc_mask[i, j - 1] == 0:
+                pressure_field_p[i, j] = (pressure_field_p[i + 1, j] + pressure_field_p[i, j - 1]) / 2.0
 
 @ti.kernel
 def set_inverted_colorfield():
@@ -235,6 +281,16 @@ def init_fields():
     #     # 4x4 super sampling:
     #     ret = taichi_logo(ti.Vector([i, j]) / (shape[0] * 4))
     #     color_field_q[i // 4, j // 4] += ret / 16
+
+
+    #fill boundary condition mask and set the ball in the middle
+    bc_mask.fill(0)
+    for i in range(0, window_width):
+        for j in range(0, window_height):
+            if (i - window_width/2)**2 + (j - window_height/2)**2 < 30**2:
+                bc_mask[i, j] = 1
+                color_field_q[i, j] = 1
+
 
 def main():
 
