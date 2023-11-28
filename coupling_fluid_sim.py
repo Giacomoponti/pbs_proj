@@ -449,14 +449,14 @@ def solve_pressure():
     # solve the system
     L = K.build()
 
-    nonzeros_count_for_rows.fill(0)
-    for i, j in ti.ndrange(N, N):
-        if abs(L[i,j]) > 0.000001:
-            nonzeros_count_for_rows[i] += 1
-    K2 = ti.linalg.SparseMatrixBuilder(N, N, max_num_triplets=N * 6)
-    fill_matrix_again_to_solve(K2, F_b)
-    L2 = K2.build()
-    L += L2
+    # nonzeros_count_for_rows.fill(0)
+    # for i, j in ti.ndrange(N, N):
+    #     if abs(L[i,j]) > 0.000001:
+    #         nonzeros_count_for_rows[i] += 1
+    # K2 = ti.linalg.SparseMatrixBuilder(N, N, max_num_triplets=N * 6)
+    # fill_matrix_again_to_solve(K2, F_b)
+    # L2 = K2.build()
+    # L += L2
 
     #print(L)
 
@@ -541,16 +541,16 @@ def fill_laplacian_matrix(A: ti.types.sparse_matrix_builder()):
             center += 1.0
         A[row, row] += center
 
-N = window_width * window_height
-K = ti.linalg.SparseMatrixBuilder(N, N, max_num_triplets=N * 6)
-F_b = ti.ndarray(ti.f32, shape=N)
+# N = window_width * window_height
+# K = ti.linalg.SparseMatrixBuilder(N, N, max_num_triplets=N * 6)
+# F_b = ti.ndarray(ti.f32, shape=N)
 
-fill_laplacian_matrix(K)
-L = K.build()
-#print(L)
-solver = ti.linalg.SparseSolver(solver_type="LLT")
-solver.analyze_pattern(L)
-solver.factorize(L)
+# fill_laplacian_matrix(K)
+# L = K.build()
+# #print(L)
+# solver = ti.linalg.SparseSolver(solver_type="LLT")
+# solver.analyze_pattern(L)
+# solver.factorize(L)
 
 
 @ti.func

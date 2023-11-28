@@ -41,6 +41,12 @@ pressure_field_p = ti.field(dtype=float, shape=shape)
 #field for boundary conditions
 bc_mask = ti.field(dtype=float, shape=shape)
 
+#build phi 
+phi = ti.field(dtype=float, shape=shape)
+
+
+
+
 # pressure solver
 # from: https://github.com/taichi-dev/taichi/blob/master/python/taichi/examples/simulation/stable_fluid.py
 @ti.kernel
@@ -134,8 +140,8 @@ def update_advection_step():
             #     velocity_field_u[i, j - 1] = -velocity_field_u[i, j + 1]  
 
             #falling ball, when collides with ground it explodes lol 
-            bc_mask[i, j] = 0
-            bc_mask[i, int(j - 9.81*stepsize_delta_t)] = 1
+            #bc_mask[i, j] = 0
+            #bc_mask[i, int(j - 9.81*stepsize_delta_t)] = 1
 
 
         # 1. Dertime velocity u_ij at grid point
@@ -152,7 +158,8 @@ def update_advection_step():
         
         #this interpolation creates problem in aroiund the ball as the color is interpolated from the sphere too
         color_q_source = bilerp(color_field_q, position_source)
-
+        #color_q_source = color_field_q[int(position_source[0]), int(position_source[1])]#sample(color_field_q, position_source[0], position_source[1])
+    
         # if bc_mask[i, j] == 1:
         #     bc_mask[i, j] = 0
         #     new_x = int(position_source[0])
@@ -303,13 +310,34 @@ def update_all_steps(fountain : ti.template()):
     # Apply boundary conditions either at each step or at the very end
 
     update_advection_step()
+
+
+    compute_phi() 
     # ignore viscosity. note from lecture:
     # "numerical dissipation due to Semi-Lagrangian advection is often sufficient"
     #print("offset: ", fountain.offset)
     update_externalforces_step(fountain.offset, fountain.angle)
+    
+    #compute_pressure_weights()
     update_pressure_step()
 
     set_inverted_colorfield()
+
+
+def compute_phi():
+    for i, j in color_field_q:
+        if color_field_q[i, j] > 0:
+            
+            for j_off in range(j-2, j+3):
+             for i_off in range(i-2, i+3):
+                if i_off < 0 or i_off >= window_width or j_off < 0 or j_off >= window_height:
+                    continue
+
+                position = ti.Vector([(i_off+0.5)*stepsize_delta_t, (j_off+0.5)*stepsize_delta_t])
+                phi_temp = ((i, j) - position).norm() - 1.02*stepsize_delta_t / 1.414
+                phi[i_off, j_off] = min(phi[i_off, j_off], phi_temp)
+
+
 
 @ti.kernel
 def init_fields():
