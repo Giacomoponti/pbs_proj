@@ -134,8 +134,8 @@ def update_advection_step():
             #     velocity_field_u[i, j - 1] = -velocity_field_u[i, j + 1]  
 
             #falling ball, when collides with ground it explodes lol 
-            #bc_mask[i, j] = 0
-            #bc_mask[i, int(j - 9.81*stepsize_delta_t)] = 1
+            bc_mask[i, j] = 0
+            bc_mask[i, int(j - 9.81*stepsize_delta_t)] = 1
 
 
         # 1. Dertime velocity u_ij at grid point
@@ -185,7 +185,7 @@ def update_advection_step():
 
 
 @ti.kernel
-def update_externalforces_step(offset : ti.template()):
+def update_externalforces_step(offset : ti.template(), angle : ti.template()):
     # I think the only external force is gravity.
     # according to ETH lecture 4 slide 36,
     # we can use a simple forward Euler integration
@@ -198,7 +198,10 @@ def update_externalforces_step(offset : ti.template()):
 
     # seems like source only moves when offset becomes lerger than fountain width
     for k in range(-fountain_pixel_width, fountain_pixel_width+1):
-        velocity_field_u[int(window_width/2 + offset)-k, 0] = ti.Vector([0, 900.0])
+        #rotaion for fountain
+        rotation = ti.Matrix([[ti.cos(angle), -ti.sin(angle)], [ti.sin(angle), ti.cos(angle)]])
+
+        velocity_field_u[int(window_width/2 + offset)-k, 0] = rotation @ ti.Vector([0, 900])
         color_field_q[int(window_width/2 + offset)-k, 0] = 1
 
     # apply boundary conditions
@@ -303,7 +306,7 @@ def update_all_steps(fountain : ti.template()):
     # ignore viscosity. note from lecture:
     # "numerical dissipation due to Semi-Lagrangian advection is often sufficient"
     #print("offset: ", fountain.offset)
-    update_externalforces_step(fountain.offset)
+    update_externalforces_step(fountain.offset, fountain.angle)
     update_pressure_step()
 
     set_inverted_colorfield()
@@ -356,7 +359,10 @@ def main():
                 #print(fountain.offset)
             elif e.key == "a":
                 fountain.offset -= 8    
-
+            elif e.key == "q":
+                fountain.angle += 0.1
+            elif e.key == "e":
+                fountain.angle -= 0.1
 
         canvas.set_image(display_inverted_color_field)
         window.show()

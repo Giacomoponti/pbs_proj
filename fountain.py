@@ -5,6 +5,7 @@ class Fountain:
         self.width = width
         self.orientation = 0
         self.offset = 0
+        self.angle = 0 # in radiant
 
        
 
