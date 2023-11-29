@@ -7,13 +7,13 @@ ti.init(default_fp=ti.f32, arch=ti.x64, kernel_profiler=True)
 N = 256
 nx = N
 ny = N
-res_x = 256
+res_x = 512
 res_y = res_x * ny // nx
 
 use_flip = True
 save_results = False
 
-gravity = -9.8
+gravity = -9.81
 flip_viscosity = 0.0
 
 SOLID = 2
@@ -147,7 +147,7 @@ class MultigridPCGPoissonSolver:
                   for _ in range(self.n_mg_levels)]  # temp
         self.f = [marker] + [ti.field(dtype=ti.i32, shape=_res(_))
                              for _ in range(self.n_mg_levels - 1)]  # marker
-        self.L = [ti.Vector(6, dtype=ti.f32, shape=_res(_))
+        self.L = [ti.Vector.field(6, dtype=ti.f32, shape=_res(_))
                   for _ in range(self.n_mg_levels)]  # -L operator
 
         self.x = ti.field(dtype=ti.f32, shape=shape)  # solution
@@ -155,7 +155,7 @@ class MultigridPCGPoissonSolver:
         self.Ap = ti.field(dtype=ti.f32, shape=shape)  # matrix-vector product
         self.alpha = ti.field(dtype=ti.f32, shape=())  # step size
         self.beta = ti.field(dtype=ti.f32, shape=())  # step size
-        self.sum = ti.field(dtypeype=ti.f32, shape=())  # storage for reductions
+        self.sum = ti.field(dtype=ti.f32, shape=())  # storage for reductions
 
         for _ in range(self.n_mg_levels):
             print(f'r[{_}].shape = {self.r[_].shape}')
@@ -224,10 +224,11 @@ class MultigridPCGPoissonSolver:
         self.reduction(self.r[0], self.r[0])
         initial_rTr = self.sum[None]
 
-        print(f"init rtr = {initial_rTr}")
+        #print(f"init rtr = {initial_rTr}")
 
         if initial_rTr < tol:
-            print(f"converged: init rtr = {initial_rTr}")
+            #print(f"converged: init rtr = {initial_rTr}")
+            pass
         else:
             # r = b - Ax = b    since x = 0
             # p = r = r + 0 p
@@ -282,7 +283,7 @@ class MultigridPCGPoissonSolver:
                 old_zTr = new_zTr
 
                 iter = i
-            print(f'converged to {rTr} in {iter} iters')
+            #print(f'converged to {rTr} in {iter} iters')
 
         x.copy_from(self.x)
 
@@ -425,19 +426,18 @@ uy_temp_tex = Texture(uy_temp, 0.5, 0.0, nx, ny + 1)
 # uy_swap = Swapper(uy, uy_temp, uy_tex, uy_temp_tex)
 
 #px = ti.Vector(2, dt=ti.f32, shape=(nx * 2, ny * 2))
-px = ti.field(dtype=ti.f32, shape=(nx * 2, ny * 2))
-px.fill(2)
+px = ti.Vector.field(2, dtype=ti.f32, shape=(nx * 2, ny * 2))
+
 #pv = ti.Vector(2, dt=ti.f32, shape=(nx * 2, ny * 2))
-pv = ti.field(dtype=ti.f32, shape=(nx * 2, ny * 2))
-pv.fill(2)
+pv = ti.Vector.field(2, dtype=ti.f32, shape=(nx * 2, ny * 2))
+
 pf = ti.field(dtype=ti.i32, shape=(nx * 2, ny * 2))
 
 valid = ti.field(dtype=ti.i32, shape=(nx + 1, ny + 1))
 valid_temp = ti.field(dtype=ti.i32, shape=(nx + 1, ny + 1))
 
 #color_buffer = ti.Vector(3, dtype=ti.f32, shape=(res_x, res_y))
-color_buffer = ti.field(dtype=ti.f32, shape=(res_x, res_y))
-color_buffer.fill(3)
+color_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(res_x, res_y))
 
 
 ps = MultigridPCGPoissonSolver(marker, nx, ny)
@@ -631,7 +631,10 @@ def save_velocities():
     uy_saved.copy_from(uy)
 
 
-def substep(dt):
+def substep(dt, input):
+    #shoot water in scene if SPACE is pressed 
+    shoot_water(input)
+
     add_force(dt)
     apply_bc()
 
@@ -671,16 +674,16 @@ def substep(dt):
 idx = 0
 
 
-def step():
+def step(input):
     global idx
-    print(f'frame {idx}')
+    #print(f'frame {idx}')
     idx = idx + 1
     # substep(1.0 / 20)
     # substep(1.0 / 20)
-    substep(1.0 / 40)
-    substep(1.0 / 40)
-    substep(1.0 / 40)
-    substep(1.0 / 40)
+    substep(1.0 / 10, input)
+    substep(1.0 / 10, input)
+    substep(1.0 / 10, input)
+    substep(1.0 / 10, input)
 
 
 @ti.kernel
@@ -773,8 +776,31 @@ def init_waterfall():
             marker[i, j] = SOLID
 
 
+@ti.kernel
+def init_ballgame():
+
+    for i, j in pressure:
+        pressure[i, j] = 0
+        divergence[i, j] = 0
+
+
+        if (j > ny - 10 and j < ny - 2 and i > 70 and i < nx - 70):
+            marker[i, j] = AIR
+            #pass
+        else:
+            marker[i, j] = AIR
+
+        if (i == 0 or i == nx or j == 0 or j == ny):
+            marker[i, j] = SOLID
+
+        #add a ball to the scene
+        if (i - nx // 2) ** 2 + (j - ny // 2) ** 2 < 100:
+            marker[i, j] = SOLID
+
 def init_fields():
-    init_waterfall()
+    #init_waterfall()
+    #init_dambreak()
+    init_ballgame()
 
 
 @ti.kernel
@@ -834,7 +860,7 @@ class Viewer:
 
         if self.dump:
             self.video_manager.write_frame(img)
-            print(f"\rframe {self.frame} written", end="")
+            #print(f"\rframe {self.frame} written", end="")
 
             if self.frame == 300:
                 self.video_manager.make_video(gif=True, mp4=True)
@@ -846,18 +872,72 @@ class Viewer:
         self.frame = self.frame + 1
 
 
+#seems like the water disppears when another call of this function is made
+@ti.kernel
+def shoot_water(input: ti.i32):
+
+    if input == 1:
+        #shoot water into the scene from the bottom of the screen
+        for j in range (20):
+            #marker[nx // 2 + i, 100] = FLUID
+            #marker[nx // 2 - i, 100] = FLUID
+            for i in range (20 - 2*j):
+            #update the particle velocity 
+                pv[nx // 2 + i, j] = ti.Vector([0.0, 70])
+                pv[nx // 2 - i, j] = ti.Vector([0.0, 70])
+                #initialize the particle position
+                px[nx // 2 + i, j] = ti.Vector([nx // 2 + i, j])
+                px[nx // 2 - i, j] = ti.Vector([nx // 2 - i, j])
+
+                #update the marker
+                marker[nx // 2 + i, j] = FLUID
+                marker[nx // 2 - i, j] = FLUID
+
+                #update the particle flag
+                pf[nx // 2 + i, j] = 1
+                pf[nx // 2 - i, j] = 1
+
+                #update the pressure
+                pressure[nx // 2 + i, j] = 0
+                pressure[nx // 2 - i, j] = 0
+
+                #update the divergence
+                divergence[nx // 2 + i, j] = 0
+                divergence[nx // 2 - i, j] = 0
+
+                #update the velocity
+                ux[nx // 2 + i, j] = 0
+                ux[nx // 2 - i, j] = 0
+
+                uy[nx // 2 + i, j] = 0
+                uy[nx // 2 - i, j] = 0
+                
+    else:
+        pass
+       
+
+
+
 def main():
     initialize()
 
     viewer = Viewer(save_results)
 
     gui = ti.GUI("flip", res=(res_x, res_y))
+    input = 0
     while viewer.active():
         for e in gui.get_events(ti.GUI.PRESS):
             if e.key == ti.GUI.ESCAPE or e.key == 'q':
                 exit(0)
-
-        step()
+            if e.key == ti.GUI.SPACE:
+                #print("shooting water")
+                input = 1
+                
+                #print("done shooting water")
+        #shoot_water(input)
+        #input = 0
+        step(input)
+        input = 0
         viewer.draw(gui)
 
         gui.show()
