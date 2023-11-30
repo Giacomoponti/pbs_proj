@@ -550,9 +550,11 @@ def extrapolate():
 
 @ti.kernel
 def recompute_solid_velocity():
-    for i, j in ti.ndrange(window_width, window_height-1):
-        pos = ti.Vector([i*dx, (j + 0.5)*dx])
-        if (0.5*(nodal_solid_phi[i, j] + nodal_rigid_phi[i, j+1]) < 0.5*(nodal_rigid_phi[i, j] + no))
+    pass
+    # for i, j in ti.ndrange(window_width, window_height-1):
+    #     pos = ti.Vector([i*dx, (j + 0.5)*dx])
+    #     if (0.5*(nodal_solid_phi[i, j] + nodal_rigid_phi[i, j+1]) < 0.5*(nodal_rigid_phi[i, j] + no))
+
 
 @ti.kernel
 def color_particles():
@@ -953,7 +955,7 @@ def main():
     init_fields()
 
 
-    # video_manager = ti.tools.VideoManager(output_dir="./", framerate=24, automatic_build=False)
+    video_manager = ti.tools.VideoManager(output_dir="./", framerate=24, automatic_build=False)
 
 
     paused = False
@@ -987,15 +989,15 @@ def main():
         # window.rect(topleft=[(rbd_com[None][0]-box2d_width_half)/window_width, (rbd_com[None][1]+box2d_width_half)/window_width], bottomright=[(rbd_com[None][0]+box2d_width_half)/window_width, (rbd_com[None][1]-box2d_width_half)/window_width], color=0xFF00FF)
         window.show()
 
-        # img = velocity_field_u.to_numpy()
-        # video_manager.write_frame(img)
+        img = display_inverted_color_field.to_numpy()
+        video_manager.write_frame(img)
 
 
         end_time_main = time.process_time()
         if print_time_spent:
             print(f'process time for "draw": {end_time_main-start_time_main:7.5f}s')
     
-    # video_manager.make_video(gif=True, mp4=True)
+    video_manager.make_video(gif=True, mp4=True)
 
 if __name__ == "__main__":
     main()
