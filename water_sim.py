@@ -128,7 +128,7 @@ class MultigridPCGPoissonSolver:
     def __init__(self, marker, nx, ny):
         shape = (nx, ny)
         self.nx, self.ny = shape
-        print(f'nx, ny = {nx}, {ny}')
+        #rint(f'nx, ny = {nx}, {ny}')
 
         self.dim = 2
         self.max_iters = 300
@@ -431,6 +431,7 @@ px = ti.Vector.field(2, dtype=ti.f32, shape=(nx * 2, ny * 2))
 #pv = ti.Vector(2, dt=ti.f32, shape=(nx * 2, ny * 2))
 pv = ti.Vector.field(2, dtype=ti.f32, shape=(nx * 2, ny * 2))
 
+pfs = ti.field(dtype=ti.i32, shape=(nx * 2, ny * 2))
 pf = ti.field(dtype=ti.i32, shape=(nx * 2, ny * 2))
 
 valid = ti.field(dtype=ti.i32, shape=(nx + 1, ny + 1))
@@ -469,9 +470,25 @@ def vel_interp(pos, ux, uy):
 @ti.kernel
 def advect_markers(dt: ti.f32):
     for i, j in px:
-        if 1 == pf[i, j]:
+        if 1 == pf[i, j]: 
             midpos = px[i, j] + vel_interp(px[i, j], ux, uy) * (dt * 0.5)
             px[i, j] += vel_interp(midpos, ux, uy) * dt
+
+        # if 1 == pfs[i, j]:
+        #     marker[int(px[i, j].x), int(px[i, j].y)] = SOLID
+        #     prev_pos = px[i, j]
+                
+        #     midpos = px[i, j] + vel_interp(px[i, j], ux, uy) * (dt * 0.5)
+        #     px[i, j] += vel_interp(midpos, ux, uy) * dt
+            
+            #if previous position was center, update center
+            #print(f'prev_pos = {prev_pos.x, prev_pos.y}')
+            #print(f'ball_center = {ball_center[0][0], ball_center[0][1]}')
+            # if ((prev_pos[0] == ball_center[0][0]) and (prev_pos[1] == ball_center[0][1])):
+                
+
+            #     ball_center[0][0] = px[i, j][0]
+            #     ball_center[0][1] = px[i, j][1]
 
 
 @ti.kernel
@@ -480,12 +497,25 @@ def apply_markers():
         if SOLID != marker[i, j]:
             marker[i, j] = AIR
 
+
+    #update solid positions in marker
+    # for m, n in px:
+    #     if 1 == pfs[m, n]:
+    #         i = clamp(int(px[m, n].x), 0, nx-1)
+    #         j = clamp(int(px[m, n].y), 0, ny-1)
+
+    #         #update fluid positions in marker
+    #         marker[i, j] = SOLID
+
+                 
+            
     for m, n in px:
         if 1 == pf[m, n]:
             i = clamp(int(px[m, n].x), 0, nx-1)
             j = clamp(int(px[m, n].y), 0, ny-1)
             if (SOLID != marker[i, j]):
                 marker[i, j] = FLUID
+    
 
 
 @ti.kernel
@@ -502,6 +532,12 @@ def apply_bc():
             ux[i + 1, j] = 0.0
             uy[i, j] = 0.0
             uy[i, j + 1] = 0.0
+
+@ti.kernel
+def apply_force_solid(dt: ti.f32):
+    for i, j in uy:
+        if SOLID == marker[i, j]:
+            uy[i, j] += gravity * dt            
 
 # from the Helmholtz decomposition
 # solve -L p = -div then apply -grad p
@@ -630,10 +666,17 @@ def save_velocities():
     ux_saved.copy_from(ux)
     uy_saved.copy_from(uy)
 
+@ti.kernel
+def check_ball():
+    for i, j in marker:
+        if marker[i, j] == SOLID:
+           #print(f'ball_center = {ball_center.x, ball_center.y}') ball center is always 0,0
+           if ((i - ball_center[0][0]) ** 2 + (j - ball_center[0][1]) ** 2 > 100):
+                marker[i, j] = AIR 
 
 def substep(dt, input):
     #shoot water in scene if SPACE is pressed 
-    shoot_water(input)
+    #shoot_water(input)
 
     add_force(dt)
     apply_bc()
@@ -644,14 +687,21 @@ def substep(dt, input):
     solve_pressure()
     apply_pressure()
 
+
     extrap_velocity()
+
     apply_bc()
+    #reapply force to solid objects
+    #apply_force_solid(dt)
+    #apply_bc()
 
     if use_flip:
         update_from_grid()
         advect_markers(dt)
         apply_markers()
+        #check_ball()
 
+        #reset state of velocities
         ux.fill(0.0)
         uy.fill(0.0)
         ux_temp.fill(0.0)
@@ -775,10 +825,16 @@ def init_waterfall():
                 or (j == ny // 3 and i < nx * 2 // 3):
             marker[i, j] = SOLID
 
+ball_center = ti.Vector.field(2, dtype=ti.f32, shape=(1))
 
 @ti.kernel
 def init_ballgame():
 
+    ball_center[0][0] = nx//2
+    ball_center[0][1] = ny//2
+    print((ball_center[0][0], ball_center[0][1]))
+
+    
     for i, j in pressure:
         pressure[i, j] = 0
         divergence[i, j] = 0
@@ -790,18 +846,66 @@ def init_ballgame():
         else:
             marker[i, j] = AIR
 
-        if (i == 0 or i == nx or j == 0 or j == ny):
+        # if (i == 0 or i == nx or j == 0 or j == ny):
+        #     marker[i, j] = SOLID
+
+        if (i - ball_center[0][0]) ** 2 + (j - ball_center[0][1]) ** 2 < 100:
             marker[i, j] = SOLID
 
-        #add a ball to the scene
-        if (i - nx // 2) ** 2 + (j - ny // 2) ** 2 < 100:
+@ti.kernel
+def init_many_balls():
+    for i, j in pressure: 
+        pressure[i, j] = 0
+        divergence[i, j] = 0
+
+        if (j > ny * 2 // 3 and j < ny - 2):
+            marker[i, j] = FLUID
+        else:
+            marker[i, j] = AIR
+
+
+        if (i == 0 or i == nx-1 or j == 0 or j == ny-1):
+            marker[i, j] = SOLID
+
+        if (i - 175) ** 2 + (j - 150) ** 2 < 100:
+            marker[i, j] = SOLID
+
+        #add a star shape to the top left corner of the screen
+        if (i - 75) ** 2 + (j - 150) ** 2 < 100:
+            marker[i, j] = SOLID
+        
+        if (i - 225) ** 2 + (j - 100) ** 2 < 100:
+            marker[i, j] = SOLID
+
+        if (i - 125) ** 2 + (j - 100) ** 2 < 100:
+            marker[i, j] = SOLID
+
+        if (i - 25) ** 2 + (j - 100) ** 2 < 100:
+            marker[i, j] = SOLID
+
+        
+
+@ti.kernel 
+def init_classic():
+    #add a cube of water at center of the screen
+    for i, j in pressure:
+        pressure[i, j] = 0
+        divergence[i, j] = 0
+
+        if (i > 83 and i < 163 and j > 83 and j < 163):
+            marker[i, j] = FLUID
+        else:
+            marker[i, j] = AIR
+
+        if (i == 0 or i == nx-1 or j == 0 or j == ny-1):
             marker[i, j] = SOLID
 
 def init_fields():
     #init_waterfall()
     #init_dambreak()
-    init_ballgame()
-
+    #init_ballgame()
+    #init_many_balls()
+    init_classic()
 
 @ti.kernel
 def init_particles():
@@ -810,17 +914,20 @@ def init_particles():
         px[m, n] = [0.0, 0.0]
         if FLUID == marker[i, j]:
             pf[m, n] = 1
+        if SOLID == marker[i, j]:
+            pfs[m, n] = 1
 
-            x = i + ((m % 2) + 0.5) / 2.0
-            y = j + ((n % 2) + 0.5) / 2.0
+        x = i + ((m % 2) + 0.5) / 2.0
+        y = j + ((n % 2) + 0.5) / 2.0
 
-            px[m, n] = [x, y]
+        px[m, n] = [x, y]
 
 
 def initialize():
     ux.fill(0.0)
     uy.fill(0.0)
     pf.fill(0)
+    pfs.fill(0) # fill flag for solid particles
     px.fill(ti.Vector([0.0, 0.0]))
     pv.fill(ti.Vector([0.0, 0.0]))
 
@@ -934,8 +1041,7 @@ def main():
                 input = 1
                 
                 #print("done shooting water")
-        #shoot_water(input)
-        #input = 0
+        shoot_water(input)
         step(input)
         input = 0
         viewer.draw(gui)
