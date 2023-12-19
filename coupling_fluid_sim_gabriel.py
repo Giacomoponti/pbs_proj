@@ -13,15 +13,19 @@ window_height = 100
 window_width = window_height
 shape = (window_width, window_height)
 N = window_width * window_height
-dx = 1.0
-stepsize_delta_t = 0.01
+particle_count = 2*N
+stepsize_delta_t = 0.005
 rho = 1.0
 g = ti.Vector([0, -9.81])
 color_decay = 0 #0.001 # set 0 for no color decay/fading
 color_multiplier = 1 - color_decay
 
+
 # init step for taichi lang
 ti.init(arch=ti.cpu)
+
+
+is_bad = ti.field(dtype=int, shape=())
 
 # define fields
 # we need two velocity fields, one before the update u_{i-1} and one after the update u_{i}.
@@ -47,15 +51,18 @@ box2d_width = int(window_width/8)
 box2d_width2 = box2d_width*box2d_width
 box2d_width_half = box2d_width//2
 mass = 1.0
+density = 10
 imatrix = mass / 12 * (box2d_width2 + box2d_width2)
 imatrixInv = 1.0/imatrix
 rbd_com = ti.Vector.field(n=2, dtype=float, shape=())
 rbd_angle = ti.field(dtype=float, shape=())
 rbd_angular_momentum = ti.field(dtype=float, shape=())
 rbd_linear_velocity = ti.Vector.field(n=2, dtype=float, shape=())
+rigid_u_mass = ti.Vector.field(n=2, dtype=float, shape=())
 
 # static geometry
 nodal_rigid_phi = ti.field(dtype=float, shape=shape)
+nodal_solid_phi = ti.field(dtype=float, shape=shape)
 rigid_u_weights = ti.Vector.field(n=2, dtype=float, shape=shape)
 solid_u = ti.Vector.field(n=2, dtype=float, shape=shape)
 # pressure solver fields  
@@ -70,11 +77,67 @@ base_rot_z = ti.field(dtype=float, shape=shape)
 u_vol = ti.Vector.field(n=4, dtype=float, shape=shape)
 viscosity = ti.field(dtype=float, shape=shape)
 # marker particles
-particles = ti.Vector.field(n=2, dtype=float, shape=(2*N))
-particle_radius = dx / 1.414 # sqrt(2)
+particles = ti.Vector.field(n=2, dtype=float, shape=(particle_count))
+particle_radius = 1 / 1.414 # sqrt(2)
 
 nonzeros_count_for_rows = ti.field(dtype=int, shape=(N))
 
+@ti.func
+def distance_to_boundary_walls(pos):
+    distance_left = -pos[0]
+    distance_right = -window_width + pos[0]
+    distance_bottom = -pos[1]
+    distance_top = -window_height + pos[1]
+
+    # how many are positives
+    positive_one = 0.0
+    positive_one_set = False
+    positive_two = 0.0
+    i = 0
+    if distance_left >= 0:
+        if not positive_one_set:
+            positive_one = distance_left
+            positive_one_set = True
+        else:
+            positive_two = distance_left
+        i += 1
+    if distance_right >= 0:
+        if not positive_one_set:
+            positive_one = distance_right
+            positive_one_set = True
+        else:
+            positive_two = distance_right
+        i += 1
+    if distance_bottom >= 0:
+        if not positive_one_set:
+            positive_one = distance_bottom
+            positive_one_set = True
+        else:
+            positive_two = distance_bottom
+        i += 1
+    if distance_top >= 0:
+        if not positive_one_set:
+            positive_one = distance_top
+            positive_one_set = True
+        else:
+            positive_two = distance_top
+        i += 1
+
+    return_val = 0.0
+    if i == 2:
+        return_val = ti.math.sqrt(positive_one*positive_one + positive_two*positive_two)
+    elif i == 1:
+        return_val = positive_one
+    else:
+        return_val = max(max(distance_left, distance_right), max(distance_bottom, distance_top))
+    return return_val
+
+
+@ti.kernel
+def set_boundary():
+    for i, j in nodal_solid_phi:
+        nodal_solid_phi[i, j] = distance_to_boundary_walls(ti.Vector([i, j]))
+    
 @ti.func
 def to_local_box_coord(pos):
     return pos - rbd_com[None]
@@ -169,15 +232,31 @@ def advect_particles():
     # move particles in/through the fluid
     # perform backtrace as in lecture
     # we could use Runge Kutta 2, 3, or 4
+
     for i in particles:
         particle_pos = particles[i]
+        if ti.math.isnan(particle_pos[0]) or ti.math.isnan(particle_pos[1]):
+            is_bad[None] = 1
+
+        if particle_pos[0] < 0 or particle_pos[0] >= window_width or particle_pos[1] < 0 or particle_pos[1] >= window_height:
+            # reposition "lost" particles at the fountain again
+            particle_pos = ti.Vector([ti.random()*window_width/8+window_width/16*7, ti.random()*window_width/16])
+
+        # velocity_u_ij = bilerp(velocity_field_u, particle_pos)
+        # position_now = particle_pos + ti.Vector([0.5, 0.5])
+        # position_source = position_now - particle_pos * stepsize_delta_t
+        # new_particle_pos = bilerp(velocity_field_u, position_source)
+
         # use RK 2
         start_velocity = bilerp(velocity_field_u, particle_pos)
         midpoint_pos = particle_pos + 0.5*stepsize_delta_t*start_velocity
         mid_velocity = bilerp(velocity_field_u, midpoint_pos)
         new_particle_pos = particle_pos + stepsize_delta_t*mid_velocity
 
-        # TODO: boundary condition. maybe
+        phi_val = bilerp(nodal_solid_phi, new_particle_pos)
+        if phi_val < 0:
+            normal = bilerp_gradient(nodal_solid_phi, new_particle_pos).normalized()
+            new_particle_pos -= phi_val*normal
 
         # test for collision with the rigid body
         pos_local = to_local_box_coord(new_particle_pos)
@@ -191,7 +270,7 @@ def advect_particles():
             particles[i] = ti.Vector([ti.random()*window_width/8+window_width/16*7, ti.random()*window_width/16])
 
     # adjust particles that drifted to close to each other
-    # min_distance = 0.5*dx
+    # min_distance = 0.5
     # for i,j in ti.ndrange(window_width, window_width):
     #     if i == j:
     #         continue
@@ -231,7 +310,7 @@ def fraction_inside_levelset(phi_left, phi_right):
 def update_rigid_body_fields():
     # update level set from current position
     for i, j in nodal_rigid_phi:
-        location = ti.Vector([i*dx, j*dx])
+        location = ti.Vector([i, j])
         nodal_rigid_phi[i, j] = get_signed_distance_function_to_box(location)
 
     # compute face area fractions from distance field
@@ -244,7 +323,14 @@ def update_rigid_body_fields():
         v_fraction = fraction_inside_levelset(rigid_left, rigid_right)
         rigid_u_weights[i, j] = ti.Vector([u_fraction, v_fraction])
 
-    # TODO: recompute the grid-based "effective" masses per axis, so that we can exactly balance in hydrostatic scenarios.
+    # recompute the grid-based "effective" masses per axis, so that we can exactly balance in hydrostatic scenarios.
+    u_sum = 0.0
+    v_sum = 0.0
+    for i, j in rigid_u_weights:
+        u_sum += rigid_u_weights[i, j][0]
+        v_sum += rigid_u_weights[i, j][1]
+    rigid_u_mass[None][0] = density*u_sum
+    rigid_u_mass[None][1] = density*v_sum
 
 @ti.func
 def get_barycentric(x, i_low, i_high):
@@ -263,12 +349,12 @@ def get_barycentric(x, i_low, i_high):
 def compute_phi():
     # estimate the liquid signed distance
     # estimate from particles
-    liquid_phi.fill(3*dx)
+    liquid_phi.fill(3)
     for p in particles:
         pos = particles[p]
         # determine containing cell
-        i, fx = get_barycentric(pos[0] / dx - 0.5, 0, window_width)
-        j, fy = get_barycentric(pos[1] / dx - 0.5, 0, window_height)
+        i, fx = get_barycentric(pos[0] - 0.5, 0, window_width)
+        j, fy = get_barycentric(pos[1] - 0.5, 0, window_height)
 
         # compute distance to surrounding few points, keep if it's the minimum
         for j_off in range(j-2, j+3):
@@ -276,17 +362,17 @@ def compute_phi():
                 if i_off < 0 or i_off >= window_width or j_off < 0 or j_off >= window_height:
                     continue
 
-                position = ti.Vector([(i_off+0.5)*dx, (j_off+0.5)*dx])
+                position = ti.Vector([(i_off+0.5), (j_off+0.5)])
                 phi_temp = (pos - position).norm() - 1.02*particle_radius
                 liquid_phi[i_off, j_off] = min(liquid_phi[i_off, j_off], phi_temp)
 
     # extrapolate phi into solids if nearby
     for i, j in liquid_phi:
-        if liquid_phi[i, j] < 0.5*dx:
+        if liquid_phi[i, j] < 0.5:
             if i + 1 < window_width and j + 1 < window_height:
                 solid_phi_val = 0.25*(nodal_rigid_phi[i,j] + nodal_rigid_phi[i+1, j] + nodal_rigid_phi[i, j+1] + nodal_rigid_phi[i+1, j+1])
                 if solid_phi_val < 0:
-                    liquid_phi[i, j] = -0.5*dx
+                    liquid_phi[i, j] = -0.5
 
 
 @ti.func
@@ -299,6 +385,11 @@ def rungekutta2(pos):
 def advect():
     for i, j in velocity_field_u:
         # semi-Lagrangian advection
+        # velocity_u_ij = velocity_field_u[i, j]
+        # position_now = ti.Vector([i, j]) + ti.Vector([0.5, 0.5])
+        # position_source = position_now - velocity_u_ij * stepsize_delta_t
+        # new_velocity_field_u[i, j] = bilerp(velocity_field_u, position_source)
+
         new_velocity_field_u[i, j] = bilerp(velocity_field_u, rungekutta2(ti.Vector([i, j]) + ti.Vector([0.5, 0.5])))
     field_copy(new_velocity_field_u, velocity_field_u)
 
@@ -318,11 +409,11 @@ def compute_pressure_weights():
 def fill_matrix_to_solve(K: ti.types.sparse_matrix_builder(), F_b: ti.types.ndarray()):
     for i, j in base_trans_x:
         # translation coupling
-        base_trans_x[i, j] = ((rigid_u_weights[i + 1, j] - rigid_u_weights[i, j]) / dx)[0]
-        base_trans_y[i, j] = ((rigid_u_weights[i, j + 1] - rigid_u_weights[i, j]) / dx)[1]
+        base_trans_x[i, j] = ((rigid_u_weights[i + 1, j] - rigid_u_weights[i, j]))[0]
+        base_trans_y[i, j] = ((rigid_u_weights[i, j + 1] - rigid_u_weights[i, j]))[1]
 
         # rotation coupling
-        pos = ti.Vector([(i+0.5)*dx, (j+0.5)*dx])
+        pos = ti.Vector([(i+0.5), (j+0.5)])
         rad = pos - rbd_com[None]
         base_rot_z[i, j] = rad[0]*base_trans_y[i,j] - rad[1]*base_trans_x[i,j]
 
@@ -336,7 +427,7 @@ def fill_matrix_to_solve(K: ti.types.sparse_matrix_builder(), F_b: ti.types.ndar
         center_phi = liquid_phi[i, j]
         if center_phi < 0:
             # right neighbour
-            term = u_weights[i+1, j][0]*stepsize_delta_t / (dx*dx)
+            term = u_weights[i+1, j][0]*stepsize_delta_t
             if term > 0:
                 right_phi = liquid_phi[i+1, j]
                 if right_phi < 0:
@@ -350,10 +441,10 @@ def fill_matrix_to_solve(K: ti.types.sparse_matrix_builder(), F_b: ti.types.ndar
                     K[index, index] += term/theta
                     nonzeros_count_for_rows[index] += 1
                     any_liquid_surface = True
-                F_b[index] += -(u_weights[i+1, j][0]*velocity_field_u[i + 1, j][0] / dx)
+                F_b[index] += -(u_weights[i+1, j][0]*velocity_field_u[i + 1, j][0])
 
             # left neighbour
-            term = u_weights[i, j][0]*stepsize_delta_t / (dx*dx)
+            term = u_weights[i, j][0]*stepsize_delta_t
             if term > 0:
                 left_phi = liquid_phi[i-1, j]
                 if left_phi < 0:
@@ -367,10 +458,10 @@ def fill_matrix_to_solve(K: ti.types.sparse_matrix_builder(), F_b: ti.types.ndar
                     K[index, index] += term/theta
                     nonzeros_count_for_rows[index] += 1
                     any_liquid_surface = True
-                F_b[index] = +(u_weights[i, j][0]*velocity_field_u[i, j][0] / dx)
+                F_b[index] = +(u_weights[i, j][0]*velocity_field_u[i, j][0])
 
             # top neighbour
-            term = u_weights[i, j+1][1]*stepsize_delta_t / (dx*dx)
+            term = u_weights[i, j+1][1]*stepsize_delta_t
             if term > 0:
                 top_phi = liquid_phi[i, j+1]
                 if top_phi < 0:
@@ -384,10 +475,10 @@ def fill_matrix_to_solve(K: ti.types.sparse_matrix_builder(), F_b: ti.types.ndar
                     K[index, index] += term/theta
                     nonzeros_count_for_rows[index] += 1
                     any_liquid_surface = True
-                F_b[index] = -(u_weights[i, j+1][1]*velocity_field_u[i, j+1][1] / dx)
+                F_b[index] = -(u_weights[i, j+1][1]*velocity_field_u[i, j+1][1])
 
             # bottom neighbour
-            term = u_weights[i, j][1]*stepsize_delta_t / (dx*dx)
+            term = u_weights[i, j][1]*stepsize_delta_t
             if term > 0:
                 bottom_phi = liquid_phi[i, j-1]
                 if bottom_phi < 0:
@@ -401,7 +492,7 @@ def fill_matrix_to_solve(K: ti.types.sparse_matrix_builder(), F_b: ti.types.ndar
                     K[index, index] += term/theta
                     nonzeros_count_for_rows[index] += 1
                     any_liquid_surface = True
-                F_b[index] = +(u_weights[i, j][1]*velocity_field_u[i, j][1] / dx)
+                F_b[index] = +(u_weights[i, j][1]*velocity_field_u[i, j][1])
 
     for i, j in ti.ndrange(window_width, window_height):
         index = i + window_width*j
@@ -423,10 +514,10 @@ def fill_matrix_to_solve(K: ti.types.sparse_matrix_builder(), F_b: ti.types.ndar
             other_phi = liquid_phi[k, m]
             if other_phi < 0:
                 # translation 
-                val += stepsize_delta_t * base_trans_x[i, j] * base_trans_x[k, m] / mass
-                val += stepsize_delta_t * base_trans_y[i, j] * base_trans_y[k, m] / mass
+                val += stepsize_delta_t * base_trans_x[i, j] * base_trans_x[k, m] / rigid_u_mass[None][0]
+                val += stepsize_delta_t * base_trans_y[i, j] * base_trans_y[k, m] / rigid_u_mass[None][1]
                 # rotation
-                val += stepsize_delta_t * base_rot_z[i, j] * base_rot_z[k, m] / mass
+                val += stepsize_delta_t * base_rot_z[i, j] * base_rot_z[k, m] * imatrixInv
                 if abs(val) > 0.000001:
                     index = i + window_width*j
                     K[index, k + window_width*m] += val
@@ -448,7 +539,7 @@ def update_pressure_after_solver(pressure: ti.types.ndarray()):
                 theta = fraction_inside_levelset(liquid_phi[i-1, j], liquid_phi[i,j])
             if theta < 0.01:
                 theta = 0.01
-            velocity_field_u[i,j][0] -= stepsize_delta_t * (pressure[index] - pressure[index-1]) / dx / theta
+            velocity_field_u[i,j][0] -= stepsize_delta_t * (pressure[index] - pressure[index-1]) / theta
             u_valid[i,j][0] = 1
         else:
             velocity_field_u[i,j][0] = 0
@@ -461,7 +552,8 @@ def update_pressure_after_solver(pressure: ti.types.ndarray()):
                 theta = fraction_inside_levelset(liquid_phi[i, j-1], liquid_phi[i,j])
             if theta < 0.01:
                 theta = 0.01
-            velocity_field_u[i,j][1] -= stepsize_delta_t * (pressure[index] - pressure[index-window_width]) / dx / theta
+
+            velocity_field_u[i,j][1] -= stepsize_delta_t * (pressure[index] - pressure[index-window_width]) / theta
             u_valid[i,j][1] = 1
         else:
             velocity_field_u[i,j][1] = 0
@@ -485,7 +577,9 @@ def solve_pressure():
     # solve the system
     L = K.build()
 
-    #print(L)
+    # print(velocity_field_u)
+    #print(liquid_phi)
+    # print(L)
 
     solver = ti.linalg.SparseSolver(solver_type="LLT")
     solver.analyze_pattern(L)
@@ -519,7 +613,7 @@ def extrapolate_step():
             if old_u_valid[i, j-1][0]:
                 sum += velocity_field_u[i, j-1][0]
                 count += 1
-            if count:
+            if count > 0:
                 new_velocity_field_u[i, j][0] = sum / count
                 u_valid[i, j][0] = 1
     # extrapolate v
@@ -539,7 +633,7 @@ def extrapolate_step():
             if old_u_valid[i, j-1][1]:
                 sum += velocity_field_u[i, j-1][1]
                 count += 1
-            if count:
+            if count > 0:
                 new_velocity_field_u[i, j][1] = sum / count
                 u_valid[i, j][1] = 1
     field_copy(new_velocity_field_u, velocity_field_u)
@@ -548,15 +642,85 @@ def extrapolate():
     for l in range(10):
         extrapolate_step()
 
+@ti.func
+def get_point_velocity(pos):
+    # rbd_com = ti.Vector.field(n=2, dtype=float, shape=())
+    # rbd_angle = ti.field(dtype=float, shape=())
+    # rbd_angular_momentum = ti.field(dtype=float, shape=())
+    # rbd_linear_velocity = ti.Vector.field(n=2, dtype=float, shape=())
+    radius = ti.Vector([pos[0] - rbd_com[None][0], pos[1] - rbd_com[None][1], 0])
+    linear_vel = ti.Vector([rbd_linear_velocity[None][0], rbd_linear_velocity[None][1], 0])
+    angular = ti.Vector([0, 0, rbd_angular_momentum[None]])
+    point_vel = angular.cross(radius)
+    return ti.Vector([point_vel[0], point_vel[1]])
+
 @ti.kernel
 def recompute_solid_velocity():
     for i, j in ti.ndrange(window_width, window_height-1):
-        pos = ti.Vector([i*dx, (j + 0.5)*dx])
-        if (0.5*(nodal_solid_phi[i, j] + nodal_rigid_phi[i, j+1]) < 0.5*(nodal_rigid_phi[i, j] + no))
+        pos = ti.Vector([i, (j + 0.5)])
+        if (0.5*(nodal_solid_phi[i, j] + nodal_rigid_phi[i, j+1]) < 0.5*(nodal_rigid_phi[i, j] + nodal_rigid_phi[i, j + 1])):
+            solid_u[i, j][0] = 0
+        else:
+            solid_u[i, j][0] = get_point_velocity(pos)[0]
+    for i, j in ti.ndrange(window_width-1, window_height):
+        pos = ti.Vector([i+0.5, j])
+        if (0.5*(nodal_solid_phi[i, j] + nodal_rigid_phi[i+1, j]) < 0.5*(nodal_rigid_phi[i, j] + nodal_rigid_phi[i+1, j])):
+            solid_u[i, j][1] = 0
+        else:
+            solid_u[i, j][1] = get_point_velocity(pos)[1]
+
+# @ti.func
+# def interpolate_gradient(field, pos):
+#     i,fx = get_barycentric(pos[0], 0, window_width)
+#     j,fy = get_barycentric(pos[1], 0, window_height)
+#     v00 = field[i, j]
+#     v01 = field[i, j+1]
+#     v00 = field[i+1, j]
+#     v00 = field[i+1, j+1]
+#     v00 = field[i, j]
+
+@ti.kernel
+def constrain_velocity():
+    field_copy(velocity_field_u, new_velocity_field_u)
+    for i, j in velocity_field_u:
+        if abs(u_weights[i, j][0]) < 0.0000001:
+            pos = ti.Vector([i, j])
+            velocity = velocity_field_u[i, j]
+            solid_velocity = solid_u[i, j]
+            solid_normal_vec = bilerp_gradient(nodal_solid_phi, pos).normalized()
+            solid_phi_val = bilerp(nodal_solid_phi, pos)
+            rigid_normal_vec = bilerp_gradient(nodal_rigid_phi, pos).normalized()
+            rigid_phi_val = bilerp(nodal_rigid_phi, pos)
+            if solid_phi_val < rigid_phi_val:
+                velocity -= velocity.dot(solid_normal_vec) * solid_normal_vec
+                velocity += solid_velocity.dot(solid_normal_vec) * solid_normal_vec
+            else:
+                velocity -= velocity.dot(rigid_normal_vec) * rigid_normal_vec
+                velocity += solid_velocity.dot(rigid_normal_vec) * rigid_normal_vec
+            new_velocity_field_u[i, j] = velocity
+    field_copy(new_velocity_field_u, velocity_field_u)
+
+@ti.kernel
+def check_for_nan():
+    for i, j in velocity_field_u:
+        if ti.math.isnan(velocity_field_u[i,j][0]) or ti.math.isnan(velocity_field_u[i,j][1]):
+            velocity_field_u[i,j] = 0.0
+    for p in particles:
+        particle_pos = particles[p]
+        if particle_pos[0] < 0 or particle_pos[0] >= window_width or particle_pos[1] < 0 or particle_pos[1] >= window_height:
+            # reposition "lost" particles at the fountain again
+            particles[p] = ti.Vector([ti.random()*window_width/8+window_width/16*7, ti.random()*window_width/16])
+
+
 
 @ti.kernel
 def color_particles():
     display_inverted_color_field.fill(1.0)
+
+    # for i,j in liquid_phi:
+    #     if liquid_phi[i,j] < 0:
+    #         display_inverted_color_field[i,j].xzy = (90/255,188/255,216/255)
+
     for p in particles:
         pos = particles[p]
         pos_x_int = int(pos[0])
@@ -633,7 +797,14 @@ def advance():
             print(f'process time for "solve_pressure": {end_time-start_time:7.5f}s')
     start_time = time.process_time()
     # update_pressure_step()
-    # 9) TODO: apply boundary conditions again and extrapolate
+    
+    # 9) apply boundary conditions again and extrapolate
+    extrapolate()
+    recompute_solid_velocity()
+    constrain_velocity()
+
+    # check for nan
+    check_for_nan()
 
     # 10) color fields that have particles
     color_particles()
@@ -642,7 +813,7 @@ def advance():
             print(f'process time for "color_particles": {end_time-start_time:7.5f}s')
     start_time = time.process_time()
 
-    extrapolate()
+
 
 
 # pressure solver
@@ -710,7 +881,30 @@ def bilerp(vf, coord):
     d = sample(vf, iu + 1.5, iv + 1.5)
     # fract
     fu, fv = s - iu, t - iv
-    return lerp(lerp(a, b, fu), lerp(c, d, fu), fv)
+    val = lerp(lerp(a, b, fu), lerp(c, d, fu), fv)
+    return val
+
+@ti.func
+def bilerp_gradient(vf, coord):
+    u = coord[0]
+    v = coord[1]
+    # use -0.5 to decide where bilerp performs in cells
+    s, t = u - 0.5, v - 0.5
+    iu, iv = int(s), int(t)
+    a = sample(vf, iu + 0.5, iv + 0.5)
+    b = sample(vf, iu + 1.5, iv + 0.5)
+    c = sample(vf, iu + 0.5, iv + 1.5)
+    d = sample(vf, iu + 1.5, iv + 1.5)
+
+    ddy0 = c - a
+    ddy1 = d - b
+
+    ddx0 = b - a
+    ddx1 = d - c
+
+    # fract
+    fu, fv = s - iu, t - iv
+    return ti.Vector([lerp(ddx0, ddx1, fv), lerp(ddy0, ddy1, fu)])
 # end bilinear interpolation
 
 @ti.kernel
@@ -777,7 +971,7 @@ def update_externalforces_step():
     # artificial force for the input
     fountain_pixel_width = 11 // 2
     for k in range(-fountain_pixel_width, fountain_pixel_width+1):
-        velocity_field_u[int(window_width/2)-k, 0] = ti.Vector([0, 500.0])
+        velocity_field_u[int(window_width/2)-k, 0] = ti.Vector([0, 20.0])
         color_field_q[int(window_width/2)-k, 0] = 1
 
     # apply boundary conditions
@@ -952,7 +1146,6 @@ def main():
     window = ti.GUI("Simulation", res=(window_width*display_multiplier, window_height*display_multiplier))
     init_fields()
 
-
     # video_manager = ti.tools.VideoManager(output_dir="./", framerate=24, automatic_build=False)
 
 
@@ -968,7 +1161,6 @@ def main():
         if print_time_spent:
             print(f'process time for "advance": {end_time_main-start_time_main:7.5f}s')
         start_time_main = time.process_time()
-
 
         if window.get_event(ti.ui.PRESS):
             e = window.event
@@ -987,7 +1179,7 @@ def main():
         # window.rect(topleft=[(rbd_com[None][0]-box2d_width_half)/window_width, (rbd_com[None][1]+box2d_width_half)/window_width], bottomright=[(rbd_com[None][0]+box2d_width_half)/window_width, (rbd_com[None][1]-box2d_width_half)/window_width], color=0xFF00FF)
         window.show()
 
-        # img = velocity_field_u.to_numpy()
+        # img = display_inverted_color_field.to_numpy()
         # video_manager.write_frame(img)
 
 
